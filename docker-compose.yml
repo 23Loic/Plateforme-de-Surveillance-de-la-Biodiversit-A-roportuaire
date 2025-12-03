@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # 1. Base SQL & Géospatiale
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: airport_postgis
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin_password
+      POSTGRES_DB: airport_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 2. Base Vectorielle (Embeddings)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: airport_qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # 3. Base de Graphe (Connaissances)
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: airport_neo4j
+    ports:
+      - "7474:7474" # HTTP
+      - "7687:7687" # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/password_graph
+    volumes:
+      - neo4j_data:/data
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  neo4j_data:

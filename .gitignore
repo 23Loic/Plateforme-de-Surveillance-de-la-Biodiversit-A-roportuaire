@@ -1,6 +1,24 @@
-# Environnement virtuel Python
-.venv/
-
-# Fichiers de cache Python
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+venv/
+.venv/
+env/
+
+# --- Variables d'environnement (Mots de passe) ---
+.env
+
+# --- Données (On ne versionne PAS les HTML/PDF bruts) ---
+data/1_bronze/*
+data/2_silver/*
+data/3_gold/*
+!data/1_bronze/.gitkeep
+!data/2_silver/.gitkeep
+!data/3_gold/.gitkeep
+
+# --- Système & IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
