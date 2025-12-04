@@ -1,0 +1,5 @@
+# Pilotes pour le diagnostic des BDD
+psycopg2-binary==2.9.9
+neo4j==5.18.0
+qdrant-client==1.7.3
+python-dotenv==1.0.1
