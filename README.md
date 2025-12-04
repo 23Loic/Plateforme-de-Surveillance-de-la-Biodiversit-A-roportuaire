@@ -28,6 +28,13 @@ Ne travaillez jamais sur le Python global. Créez un environnement virtuel isol�
 Sur Windows (PowerShell) :
 
 python -m venv venv
+
+Si vous avez une erreur "Python introuvable", essayez avec le lanceur Windows :
+
+py -m venv venv
+
+Ensuite activez l'environnement :
+
 .\venv\Scripts\activate
 
 Sur Mac / Linux :
@@ -109,4 +116,9 @@ docker-compose up -d
 
 Problème : Docker ne démarre pas
 → Vérifier que la virtualisation est activée dans le BIOS.
+
+Problème : "L'exécution de scripts est désactivée sur ce système"
+> C'est une sécurité Windows par défaut. Pour l'autoriser, lancez cette commande dans PowerShell :
+> `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+> Tapez "O" ou "Y" pour confirmer, puis réessayez d'activer le venv.
 
