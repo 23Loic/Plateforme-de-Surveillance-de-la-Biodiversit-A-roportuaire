@@ -1,124 +1,181 @@
-Projet Airport AI - Biodiversité & Sécurité
+# AeroWise - Système de Gestion Aéroportuaire Intelligent
 
-Ce projet a pour objectif de créer une base de données intelligente pour la gestion des risques aéroportuaires liés à la biodiversité (Bird Strikes, incursions). Il s'appuie sur une architecture multi-agents et des bases de données spécialisées (Géospatiale, Graphe, Vectorielle).
+AeroWise est une plateforme Big Data dédiée à la gestion des risques aéroportuaires, avec un focus particulier sur la biodiversité (Péril Animalier) et la sécurité des pistes.
 
----
-
-1. Pré-requis
-
-Avant de récupérer le projet, assurez-vous d'avoir installé sur votre machine :
-- Git : Pour le versioning.
-- Docker Desktop : Indispensable pour faire tourner les bases de données.
-- Python 3.10 (ou supérieur).
-- VS Code (Recommandé) avec l'extension Python.
+L'architecture repose sur une collecte de données multi-sources (Scraping), une analyse par IA (Agents, OCR, NLP) et un stockage multi-modèle (Géospatial, Graphe, Vectoriel).
 
 ---
 
-2. Installation (Pas à pas)
+## 1. Pré-requis techniques
 
-Étape A : Cloner le dépôt
-Ouvrez votre terminal et lancez :
+Avant de commencer, assurez-vous d'avoir installé :
 
-git clone <URL_DU_REPO_GITHUB>
+- **Git** : Pour cloner le dépôt
+- **Docker Desktop** : Indispensable pour l'infrastructure (PostGIS, Neo4j, Qdrant)
+- **Python 3.10+** : Langage principal du backend
+- **Node.js & npm** : Pour la partie Frontend (React)
+- **VS Code** (Recommandé)
+
+---
+
+## 2. Installation (Backend)
+
+### Étape A : Cloner le projet
+
+```bash
+git clone <VOTRE_URL_REPO>
 cd airport-ai-project
+```
 
-Étape B : Configurer l'environnement Python
-Ne travaillez jamais sur le Python global. Créez un environnement virtuel isolé.
+### Étape B : Créer l'environnement virtuel
 
-Sur Windows (PowerShell) :
+Ne travaillez jamais sur le Python global.
 
+**Windows (PowerShell) :**
+
+```powershell
+# Création (Si 'python' ne marche pas, essayez 'py')
 python -m venv venv
 
-Si vous avez une erreur "Python introuvable", essayez avec le lanceur Windows :
-
-py -m venv venv
-
-Ensuite activez l'environnement :
-
+# Activation
 .\venv\Scripts\activate
+```
 
-Sur Mac / Linux :
+**Mac / Linux :**
 
+```bash
 python3 -m venv venv
 source venv/bin/activate
+```
 
-Étape C : Installer les dépendances
+### Étape C : Installation en mode "Editable" (Vital)
 
-pip install -r requirements.txt
+Pour éviter les erreurs d'import (`ModuleNotFoundError: src`), nous installons le projet comme un package local. Cela permet d'importer les fichiers entre les dossiers scrapers, agents et api.
 
-Étape D : Configuration des secrets (.env)
+```bash
+pip install -e .
+```
 
-Dupliquez le fichier .env.example situé à la racine.
-Renommez la copie en .env.
-Ce fichier contient les mots de passe des bases de données (pré-configurés pour Docker) et les clés API (OpenAI, DeepSeek) à ajouter soi-même.
-Le fichier .env est ignoré par Git pour des raisons de sécurité.
+### Étape D : Installer les dépendances des modules
+
+Installez les librairies requises selon la partie sur laquelle vous travaillez :
+
+```bash
+# Pour le Scraping et la Data
+pip install -r src/scrapers/requirements.txt
+
+# Pour les utilitaires de diagnostic BDD
+pip install -r src/utils/requirements.txt
+```
+
+### Étape E : Configuration des secrets (.env)
+
+1. Créez un fichier `.env` à la racine du projet
+2. Copiez-y le contenu ci-dessous (mots de passe configurés pour Docker local) :
+
+```ini
+# --- CONFIGURATION AEROWISE ---
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=admin_password
+POSTGRES_DB=aerowise_db
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5433
+
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=password_graph
+
+QDRANT_HOST=localhost
+QDRANT_PORT=6333
+
+# Ajoutez vos clés API ici
+OPENAI_API_KEY=
+DEEPSEEK_API_KEY=
+```
 
 ---
 
-3. Lancement de l'Infrastructure
+## 3. Lancement de l'Infrastructure
 
-Ce projet utilise Docker pour orchestrer les bases de données (PostGIS, Neo4j, Qdrant). Il n'est pas nécessaire de les installer localement.
+Toutes les bases de données tournent sous Docker.
 
-Assurez-vous que Docker Desktop est lancé.
-Dans le terminal, lancez :
-
+```bash
 docker-compose up -d
+```
 
-Le premier lancement peut prendre plusieurs minutes.
+⚠️ Le premier lancement peut être long (téléchargement des images).
 
----
+**Vérification :** Pour s'assurer que les bases répondent bien, lancez le script de diagnostic :
 
-4. Vérification de l'installation
+```bash
+python src/utils/check_db.py
+```
 
-Un script de diagnostic permet de valider la connectivité aux bases de données.
-Assurez-vous d'être dans l'environnement virtuel et lancez :
-
-python check_db.py
-
-Si le script retourne trois messages de succès, tout fonctionne.
+✅ Vous devez obtenir 3 succès.
 
 ---
 
-5. Organisation du Projet
+## 4. Structure du Projet
 
-Le projet suit une architecture Medallion (Bronze → Silver → Gold).
+L'architecture suit une logique modulaire :
 
-data/ : ignoré par Git, contient les données locales
-- 1_bronze/ : Données brutes (HTML, PDF)
-- 2_silver/ : Données nettoyées (Markdown)
-- 3_gold/ : Données enrichies (vecteurs, graphes)
+```
+data/                       # Stockage local (Ignoré par Git)
+├── 1_bronze/              # Données brutes (HTML, PDF)
+├── 2_silver/              # Données nettoyées (Markdown, JSON)
+└── 3_gold/                # Données enrichies (Vecteurs)
 
-src/ : Code source
-- scrapers/ : scripts de collecte
-- processors/ : OCR, nettoyage
-- database/ : connexion aux BDD
+docker/                     # Fichiers de configuration Infra
+
+src/                        # Code source Python
+├── scrapers/              # Modules de collecte (1 dossier par site)
+├── processors/            # Modules de transformation (OCR, Chunking)
+├── agents/                # Logique IA et Chatbot
+├── api/                   # Serveur Backend (FastAPI)
+└── utils/                 # Scripts transverses
+
+frontend/                   # Applications Web et Mobile
+```
 
 ---
 
-6. Dépannage (FAQ)
+## 5. Utilisation : Lancer un Scraper
 
-Problème : Module not found ou pip n'est pas reconnu
-→ L’environnement virtuel n'est pas activé.
+Grâce à l'installation en mode package, vous pouvez lancer les scripts depuis la racine.
 
-Windows : .\venv\Scripts\activate
-Mac/Linux : source venv/bin/activate
+**Exemple : Lancer le scraper iNaturalist**
 
-Problème : Erreur de connexion BDD (byte 0xe9, Connection Refused)
-→ Conflit de port probable.
+```bash
+python src/scrapers/inaturalist/main.py
+```
 
-1. Ouvrir docker-compose.yml
-2. Modifier le port, ex : "5433:5432"
-3. Mettre à jour check_db.py
-4. Relancer Docker :
+---
 
-docker-compose down
+## 6. Dépannage (FAQ)
+
+### Erreur : "L'exécution de scripts est désactivée sur ce système" (PowerShell)
+
+**Solution :** Windows bloque l'activation du venv par sécurité. Lancez cette commande (une seule fois) :
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+### Erreur : "ModuleNotFoundError: No module named 'src'"
+
+**Solution :** Vous avez oublié l'étape C. Lancez `pip install -e .` à la racine.
+
+### Erreur : Neo4j "ClientError: ... already running" ou pid:7
+
+**Solution :** Neo4j n'a pas été arrêté proprement.
+
+```bash
+docker-compose down -v  # Attention, supprime les données de la base
 docker-compose up -d
+```
 
-Problème : Docker ne démarre pas
-→ Vérifier que la virtualisation est activée dans le BIOS.
+**Note :** L'option `init: true` a été ajoutée au docker-compose pour éviter cela.
 
-Problème : "L'exécution de scripts est désactivée sur ce système"
-> C'est une sécurité Windows par défaut. Pour l'autoriser, lancez cette commande dans PowerShell :
-> `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
-> Tapez "O" ou "Y" pour confirmer, puis réessayez d'activer le venv.
+### Erreur : Connexion BDD refusée (byte 0xe9)
 
+**Solution :** Vérifiez que vous n'avez pas un autre Postgres local qui tourne sur le port 5432. AeroWise utilise le port 5433 pour éviter les conflits.
