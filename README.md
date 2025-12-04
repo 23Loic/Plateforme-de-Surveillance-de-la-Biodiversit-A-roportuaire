@@ -1,7 +1,6 @@
 # AeroWise - Système de Gestion Aéroportuaire Intelligent
 
-AeroWise est une plateforme Big Data dédiée à la gestion des risques aéroportuaires, avec un focus particulier sur la biodiversité (Péril Animalier) et la sécurité des pistes.
-
+AeroWise est une plateforme Big Data dédiée à la gestion des risques aéroportuaires, avec un focus particulier sur la biodiversité.
 L'architecture repose sur une collecte de données multi-sources (Scraping), une analyse par IA (Agents, OCR, NLP) et un stockage multi-modèle (Géospatial, Graphe, Vectoriel).
 
 ---
