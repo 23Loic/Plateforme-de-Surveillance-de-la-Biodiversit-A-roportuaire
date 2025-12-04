@@ -1,0 +1,11 @@
+# --- Base Scraping ---
+requests==2.31.0
+beautifulsoup4==4.12.3
+
+# --- Avancé (Pour les sites complexes en JS) ---
+selenium==4.18.1
+webdriver-manager==4.0.1
+
+# --- Utilitaires Données ---
+pandas==2.2.0
+python-dotenv==1.0.1

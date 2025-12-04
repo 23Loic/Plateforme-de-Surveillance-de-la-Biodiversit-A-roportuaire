@@ -1,0 +1,13 @@
+README.md
+setup.py
+aerowise.egg-info/PKG-INFO
+aerowise.egg-info/SOURCES.txt
+aerowise.egg-info/dependency_links.txt
+aerowise.egg-info/top_level.txt
+src/__init__.py
+src/database/__init__.py
+src/processors/__init__.py
+src/scrapers/__init__.py
+src/scrapers/base_scraper.py
+src/scrapers/inaturalist/__init__.py
+src/scrapers/inaturalist/main.py

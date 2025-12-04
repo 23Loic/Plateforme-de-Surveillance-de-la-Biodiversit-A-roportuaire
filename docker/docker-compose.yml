@@ -3,20 +3,20 @@ services:
   # 1. Base SQL & Géospatiale
   postgres:
     image: postgis/postgis:16-3.4
-    container_name: airport_postgis
+    container_name: aerowise_postgis
     ports:
       - "5433:5432"
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin_password
-      POSTGRES_DB: airport_db
+      POSTGRES_DB: aerowise_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
   # 2. Base Vectorielle (Embeddings)
   qdrant:
     image: qdrant/qdrant:latest
-    container_name: airport_qdrant
+    container_name: aerowise_qdrant
     ports:
       - "6333:6333"
     volumes:
@@ -25,7 +25,7 @@ services:
   # 3. Base de Graphe (Connaissances)
   neo4j:
     image: neo4j:5.15-community
-    container_name: airport_neo4j
+    container_name: aerowise_neo4j
     ports:
       - "7474:7474"
       - "7687:7687"
