@@ -1,211 +1,95 @@
-import time
-import re
+import requests
 import json
+import time
 import os
 import sys
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
-from src.scrapers.base_scraper import BaseScraper, logger
+# --- CONFIGURATION ---
+BASE_URL = "https://api.inaturalist.org/v1/taxa"
+OUTPUT_DIR = "data/0_planning"
 
-class INaturalistDeepTraverser(BaseScraper):
-    def __init__(self):
-        super().__init__(base_url="https://www.inaturalist.org", output_subfolder="0_planning")
-        self.start_url = "https://www.inaturalist.org/taxa/3-Aves"
+# ID Taxonomique (3 = Aves/Oiseaux)
+TAXON_ID = 3
+TIMEOUT_SEC = 30
+REQ_PER_SEC = 1.0  # Temporisation pour la stabilite
 
-    def _init_driver(self):
-        chrome_options = Options()
-        chrome_options.add_argument("--log-level=3")
-        chrome_options.add_argument("--silent")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--no-sandbox")
-        # chrome_options.add_argument("--headless") # Decommenter pour cacher le navigateur
-        self.driver = webdriver.Chrome(options=chrome_options)
+def fetch_bird_species():
+    """
+    Recupere la liste complete des especes via l'API.
+    Utilise la pagination 'id_above' pour garantir l'exhaustivite (10k+ especes).
+    Ne garde que les donnees utiles pour le futur scraping.
+    """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    all_species = []
+    last_id = 0
+    batch_size = 200 # Max par page
+    
+    print(f"Demarrage de l'indexation API (Taxon ID: {TAXON_ID})...")
+    
+    while True:
+        params = {
+            'taxon_id': TAXON_ID,
+            'rank': 'species',         # On filtre deja ici, donc le champ 'rank' devient inutile
+            'per_page': batch_size,
+            'locale': 'fr',            # Noms communs francais
+            'preferred_place_id': 1,
+            'is_active': 'true',
+            'order': 'asc',
+            'order_by': 'id',
+            'id_above': last_id        # Pagination glissante
+        }
 
-    def ensure_taxonomy_tab(self):
-        """
-        Active l'onglet Taxinomie sur la page actuelle.
-        C'est indispensable pour voir l'arbre ou les listes enfants.
-        """
         try:
-            wait = WebDriverWait(self.driver, 5)
-            # On cherche le lien qui active l'onglet #taxonomy-tab
-            tab_link = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#taxonomy-tab']")))
-            self.driver.execute_script("arguments[0].click();", tab_link)
+            response = requests.get(BASE_URL, params=params, timeout=TIMEOUT_SEC)
             
-            # Attente courte pour que le contenu charge
-            time.sleep(2)
-            return True
-        except:
-            return False
+            if response.status_code != 200:
+                print(f"Erreur API {response.status_code}")
+                break
 
-    def get_links_by_rank(self, rank_name):
-        """
-        Recupere les liens des enfants d'un rang donne (ex: 'order', 'family').
-        Utilise sur les pages parents.
-        """
-        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-        links = []
-        
-        # Le conteneur de l'arbre
-        container = soup.find("div", id="taxonomy-tab")
-        if not container: return []
+            data = response.json()
+            results = data.get('results', [])
 
-        # On cherche les spans: taxon order, taxon family...
-        target_class = f"taxon {rank_name}"
-        nodes = container.find_all("span", class_=lambda x: x and target_class in x)
+            if not results:
+                break
 
-        for node in nodes:
-            try:
-                link_tag = node.find("a", class_="sciname") or node.find("a", href=True)
-                if not link_tag: continue
-                
-                href = link_tag['href']
-                # Extraction ID
-                match = re.search(r'/taxa/(\d+)', href)
-                if not match: continue
-                
-                # Nom (nettoyage basique)
-                raw_name = link_tag.get_text(strip=True)
-                name = raw_name.replace("Ordre", "").replace("Order", "") \
-                               .replace("Famille", "").replace("Family", "").strip()
+            for taxon in results:
+                # On recupere uniquement ce qui sert a identifier la page a scraper
+                entry = {
+                    'id': str(taxon['id']),
+                    'scientific_name': taxon['name'],
+                    'common_name': taxon.get('preferred_common_name', ''),
+                    # URL cible pour le scraper
+                    'url': f"https://www.inaturalist.org/taxa/{taxon['id']}",
+                    # Image API (utile comme backup si le scraping echoue)
+                    'api_image_url': taxon.get('default_photo', {}).get('medium_url') if taxon.get('default_photo') else None
+                }
+                all_species.append(entry)
 
-                links.append({
-                    "name": name,
-                    "url": f"{self.base_url}{href}"
-                })
-            except: continue
+            last_id = results[-1]['id']
             
-        # Dedoublonnage
-        unique = {v['url']: v for v in links}.values()
-        return list(unique)
+            # Feedback minimaliste
+            sys.stdout.write(f"\rIndexe : {len(all_species)} especes (Curseur ID: {last_id})")
+            sys.stdout.flush()
 
-    def extract_species_from_current_page(self):
-        """
-        Recupere les especes et sous-especes sur la page actuelle (niveau Famille).
-        Utilise ton selecteur precis 'SplitTaxon'.
-        """
-        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-        species_data = []
-
-        container = soup.find("div", id="taxonomy-tab")
-        if not container: return []
-
-        # TON SELECTEUR : class="SplitTaxon taxon species..." ou "...subspecies..."
-        # On cherche toutes les balises qui correspondent
-        target_nodes = container.find_all("span", class_=lambda x: x and "SplitTaxon" in x and ("species" in x or "subspecies" in x))
-
-        for node in target_nodes:
-            try:
-                # 1. Recuperation du lien (code + url)
-                link = node.find("a", href=True)
-                if not link: continue
-                
-                href = link['href']
-                match = re.search(r'/taxa/(\d+)', href)
-                if not match: continue
-                
-                code = match.group(1)
-                
-                # On ignore l'ID 1 ou 3 (Animalia/Aves) si par erreur ils sont pris
-                if code in ["1", "3"]: continue
-
-                # 2. Recuperation du Nom
-                # Priorite : Nom commun (comname) > Nom scientifique (sciname)
-                name_tag = node.find("a", class_="comname")
-                if not name_tag:
-                    name_tag = node.find("a", class_="sciname")
-                
-                if name_tag:
-                    # On nettoie le texte (au cas ou il y a des balises <span class="rank"> dedans)
-                    # On decompose les spans internes pour ne garder que le texte pur
-                    temp_soup = BeautifulSoup(str(name_tag), 'html.parser')
-                    for rank in temp_soup.find_all("span", class_="rank"):
-                        rank.decompose()
-                    final_name = temp_soup.get_text(strip=True)
-                else:
-                    final_name = "Inconnu"
-
-                species_data.append({
-                    "code": code,
-                    "nom": final_name,
-                    "url": f"{self.base_url}{href}"
-                })
-
-            except: continue
-
-        return species_data
-
-    def run(self):
-        logger.info("Demarrage du Parcours Complet (Ordre > Famille > Especes)...")
-        self._init_driver()
-        master_list = []
-        
-        try:
-            # ETAPE 1 : Recuperer les Ordres depuis la page Aves
-            self.driver.get(self.start_url)
-            self.ensure_taxonomy_tab()
-            
-            orders = self.get_links_by_rank("order")
-            logger.info(f"{len(orders)} Ordres trouves a la racine.")
-            
-            # ETAPE 2 : Parcourir chaque Ordre
-            count_ord = 1
-            for order in orders:
-                logger.info(f"[{count_ord}/{len(orders)}] Exploration Ordre : {order['name']}")
-                
-                # Navigation vers la page de l'Ordre
-                self.driver.get(order['url'])
-                self.ensure_taxonomy_tab()
-                
-                # Recuperer les Familles
-                families = self.get_links_by_rank("family")
-                logger.info(f"   -> {len(families)} familles trouvees.")
-                
-                # ETAPE 3 : Parcourir chaque Famille
-                for fam in families:
-                    # Navigation vers la page de la Famille
-                    self.driver.get(fam['url'])
-                    self.ensure_taxonomy_tab()
-                    
-                    # C'est ici qu'on recupere les especes/sous-especes
-                    # Puisqu'on est au niveau Famille, l'arbre affiche generalement tout
-                    # On scrolle un peu pour charger le lazy-loading si besoin
-                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    time.sleep(1)
-                    
-                    species = self.extract_species_from_current_page()
-                    
-                    # Ajout a la liste globale
-                    for sp in species:
-                        sp['ordre'] = order['name']
-                        sp['famille'] = fam['name']
-                        master_list.append(sp)
-                        
-                    sys.stdout.write(f"\r      + {fam['name']} : {len(species)} codes recuperes.\n")
-                
-                count_ord += 1
-
-            # SAUVEGARDE
-            os.makedirs("data/0_planning", exist_ok=True)
-            path = "data/0_planning/MASTER_AVES_CODES.json"
-            
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(master_list, f, indent=4, ensure_ascii=False)
-                
-            logger.info("-" * 30)
-            logger.info(f"Termine. {len(master_list)} especes/sous-especes sauvegardees.")
-            logger.info(f"Fichier : {path}")
+            time.sleep(REQ_PER_SEC)
 
         except Exception as e:
-            logger.error(f"Erreur critique : {e}")
-        finally:
-            if self.driver: self.driver.quit()
+            print(f"\nErreur : {e}")
+            break
+
+    # --- GENERATION DES FICHIERS ---
+    print("\n" + "-" * 50)
+    
+    # Fichier Plan de Scraping (JSON leger)
+    filename = f"SCRAPING_PLAN_{TAXON_ID}.json"
+    output_path = os.path.join(OUTPUT_DIR, filename)
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(all_species, f, ensure_ascii=False, indent=4)
+
+    print(f"Termine. {len(all_species)} especes indexees.")
+    print(f"Fichier genere : {output_path}")
 
 if __name__ == "__main__":
-    bot = INaturalistDeepTraverser()
-    bot.run()
+    fetch_bird_species()
