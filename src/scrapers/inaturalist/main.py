@@ -1,177 +1,211 @@
 import time
 import re
+import json
+import os
 import sys
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-# Import absolu depuis le package AeroWise
 from src.scrapers.base_scraper import BaseScraper, logger
 
-class INaturalistScraper(BaseScraper):
+class INaturalistDeepTraverser(BaseScraper):
     def __init__(self):
-        super().__init__(
-            base_url="https://www.inaturalist.org", 
-            output_subfolder="inaturalist_birds"
-        )
-        self.driver = None
+        super().__init__(base_url="https://www.inaturalist.org", output_subfolder="0_planning")
+        self.start_url = "https://www.inaturalist.org/taxa/3-Aves"
 
     def _init_driver(self):
         chrome_options = Options()
-        
-        # --- 1. OPTIMISATIONS POUR EVITER LES CRASH ---
-        # Masque les logs techniques de Chrome (DEPRECATED_ENDPOINT, etc.)
-        chrome_options.add_argument("--log-level=3") 
+        chrome_options.add_argument("--log-level=3")
         chrome_options.add_argument("--silent")
-        
-        # Desactive les extensions et fonctionnalités lourdes
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-gpu") 
-        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--no-sandbox")
-        
-        # Tu peux décommenter pour voir le navigateur (utile pour debug)
-        # chrome_options.add_argument("--headless") 
-
+        # chrome_options.add_argument("--headless") # Decommenter pour cacher le navigateur
         self.driver = webdriver.Chrome(options=chrome_options)
 
-    def scroll_to_bottom(self):
+    def ensure_taxonomy_tab(self):
         """
-        Scroll infini SÉCURISÉ.
-        S'arrête si la page ne grandit plus après 3 essais successifs.
+        Active l'onglet Taxinomie sur la page actuelle.
+        C'est indispensable pour voir l'arbre ou les listes enfants.
         """
-        logger.info("Debut du chargement...")
-        
-        last_height = self.driver.execute_script("return document.body.scrollHeight")
-        scroll_count = 0
-        
-        # Compteur pour détecter si on est bloqué
-        stuck_counter = 0 
-        MAX_STUCK_RETRIES = 3  # On essaie 3 fois avant d'abandonner
-        
-        # Sécurité : On s'arrête forcément après 500 scrolls (environ 15 000 oiseaux...)
-        # pour éviter de faire exploser la RAM du PC.
-        MAX_SCROLLS_SAFETY = 500 
-
-        while scroll_count < MAX_SCROLLS_SAFETY:
-            # Scroll vers le bas
-            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        try:
+            wait = WebDriverWait(self.driver, 5)
+            # On cherche le lien qui active l'onglet #taxonomy-tab
+            tab_link = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='#taxonomy-tab']")))
+            self.driver.execute_script("arguments[0].click();", tab_link)
             
-            # On attend un peu plus longtemps pour laisser le temps au réseau (3.5s)
-            time.sleep(3.5) 
-            
-            new_height = self.driver.execute_script("return document.body.scrollHeight")
-            
-            if new_height == last_height:
-                # La page n'a pas bougé... Est-ce la fin ou un lag ?
-                stuck_counter += 1
-                sys.stdout.write(f"\r    Pas de nouveau contenu ({stuck_counter}/{MAX_STUCK_RETRIES})...")
-                sys.stdout.flush()
-                
-                if stuck_counter >= MAX_STUCK_RETRIES:
-                    print("\n Fin de la page ou blocage détecté. Arrêt du scroll.")
-                    break
-            else:
-                # Ça a bougé, on reset le compteur de blocage
-                stuck_counter = 0
-                last_height = new_height
-                scroll_count += 1
-                sys.stdout.write(f"\r   Chargement page/scroll #{scroll_count}...")
-                sys.stdout.flush()
+            # Attente courte pour que le contenu charge
+            time.sleep(2)
+            return True
+        except:
+            return False
+
+    def get_links_by_rank(self, rank_name):
+        """
+        Recupere les liens des enfants d'un rang donne (ex: 'order', 'family').
+        Utilise sur les pages parents.
+        """
+        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+        links = []
         
-        logger.info("Chargement termine.")
+        # Le conteneur de l'arbre
+        container = soup.find("div", id="taxonomy-tab")
+        if not container: return []
 
-    def extract_data(self, html_content):
-        # ... (Cette partie ne change pas, garde ton code précédent) ...
-        soup = BeautifulSoup(html_content, 'html.parser')
-        extracted_items = []
-        cells = soup.find_all("div", class_="taxon-grid-cell")
+        # On cherche les spans: taxon order, taxon family...
+        target_class = f"taxon {rank_name}"
+        nodes = container.find_all("span", class_=lambda x: x and target_class in x)
 
-        for cell in cells:
+        for node in nodes:
             try:
-                link_tag = cell.find("a", class_="photo")
+                link_tag = node.find("a", class_="sciname") or node.find("a", href=True)
                 if not link_tag: continue
-                href = link_tag.get('href')
-                full_url = f"{self.base_url}{href}"
+                
+                href = link_tag['href']
+                # Extraction ID
+                match = re.search(r'/taxa/(\d+)', href)
+                if not match: continue
+                
+                # Nom (nettoyage basique)
+                raw_name = link_tag.get_text(strip=True)
+                name = raw_name.replace("Ordre", "").replace("Order", "") \
+                               .replace("Famille", "").replace("Family", "").strip()
 
-                image_url = None
-                style = link_tag.get('style', '')
-                match = re.search(r'url\([\"\']?(.*?)[\"\']?\)', style)
-                if match:
-                    image_url = match.group(1)
-
-                common_name = "Inconnu"
-                caption = cell.find("div", class_="caption")
-                if caption:
-                    name_tag = caption.find("a", class_="display-name")
-                    if name_tag:
-                        rank_tag = name_tag.find("span", class_="rank")
-                        if rank_tag: rank_tag.decompose()
-                        common_name = name_tag.get_text(strip=True)
-
-                    scientific_name = "Inconnu"
-                    sciname_tag = caption.find("a", class_="secondary-name")
-                    if sciname_tag:
-                        rank_sci = sciname_tag.find("span", class_="rank")
-                        if rank_sci: rank_sci.decompose()
-                        scientific_name = sciname_tag.get_text(strip=True)
-
-                extracted_items.append({
-                    "common_name": common_name,
-                    "scientific_name": scientific_name,
-                    "url_fiche": full_url,
-                    "image_url": image_url
+                links.append({
+                    "name": name,
+                    "url": f"{self.base_url}{href}"
                 })
-            except Exception:
-                continue
-        return extracted_items
+            except: continue
+            
+        # Dedoublonnage
+        unique = {v['url']: v for v in links}.values()
+        return list(unique)
+
+    def extract_species_from_current_page(self):
+        """
+        Recupere les especes et sous-especes sur la page actuelle (niveau Famille).
+        Utilise ton selecteur precis 'SplitTaxon'.
+        """
+        soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+        species_data = []
+
+        container = soup.find("div", id="taxonomy-tab")
+        if not container: return []
+
+        # TON SELECTEUR : class="SplitTaxon taxon species..." ou "...subspecies..."
+        # On cherche toutes les balises qui correspondent
+        target_nodes = container.find_all("span", class_=lambda x: x and "SplitTaxon" in x and ("species" in x or "subspecies" in x))
+
+        for node in target_nodes:
+            try:
+                # 1. Recuperation du lien (code + url)
+                link = node.find("a", href=True)
+                if not link: continue
+                
+                href = link['href']
+                match = re.search(r'/taxa/(\d+)', href)
+                if not match: continue
+                
+                code = match.group(1)
+                
+                # On ignore l'ID 1 ou 3 (Animalia/Aves) si par erreur ils sont pris
+                if code in ["1", "3"]: continue
+
+                # 2. Recuperation du Nom
+                # Priorite : Nom commun (comname) > Nom scientifique (sciname)
+                name_tag = node.find("a", class_="comname")
+                if not name_tag:
+                    name_tag = node.find("a", class_="sciname")
+                
+                if name_tag:
+                    # On nettoie le texte (au cas ou il y a des balises <span class="rank"> dedans)
+                    # On decompose les spans internes pour ne garder que le texte pur
+                    temp_soup = BeautifulSoup(str(name_tag), 'html.parser')
+                    for rank in temp_soup.find_all("span", class_="rank"):
+                        rank.decompose()
+                    final_name = temp_soup.get_text(strip=True)
+                else:
+                    final_name = "Inconnu"
+
+                species_data.append({
+                    "code": code,
+                    "nom": final_name,
+                    "url": f"{self.base_url}{href}"
+                })
+
+            except: continue
+
+        return species_data
 
     def run(self):
-        target_url = f"{self.base_url}/observations?view=species&iconic_taxa=Aves"
-        logger.info(f"Demarrage AeroWise Scraper : {target_url}")
-
+        logger.info("Demarrage du Parcours Complet (Ordre > Famille > Especes)...")
+        self._init_driver()
+        master_list = []
+        
         try:
-            self._init_driver()
-            self.driver.get(target_url)
-            time.sleep(5) # Attente initiale plus longue
+            # ETAPE 1 : Recuperer les Ordres depuis la page Aves
+            self.driver.get(self.start_url)
+            self.ensure_taxonomy_tab()
             
-            # 1. Scroll sécurisé
-            self.scroll_to_bottom()
+            orders = self.get_links_by_rank("order")
+            logger.info(f"{len(orders)} Ordres trouves a la racine.")
             
-            full_html = self.driver.page_source
-            
-            # 2. Extraction
-            items = self.extract_data(full_html)
-            
-            if not items:
-                logger.error(" Aucune espèce trouvée ! Vérifier le chargement de la page.")
-                return
+            # ETAPE 2 : Parcourir chaque Ordre
+            count_ord = 1
+            for order in orders:
+                logger.info(f"[{count_ord}/{len(orders)}] Exploration Ordre : {order['name']}")
+                
+                # Navigation vers la page de l'Ordre
+                self.driver.get(order['url'])
+                self.ensure_taxonomy_tab()
+                
+                # Recuperer les Familles
+                families = self.get_links_by_rank("family")
+                logger.info(f"   -> {len(families)} familles trouvees.")
+                
+                # ETAPE 3 : Parcourir chaque Famille
+                for fam in families:
+                    # Navigation vers la page de la Famille
+                    self.driver.get(fam['url'])
+                    self.ensure_taxonomy_tab()
+                    
+                    # C'est ici qu'on recupere les especes/sous-especes
+                    # Puisqu'on est au niveau Famille, l'arbre affiche generalement tout
+                    # On scrolle un peu pour charger le lazy-loading si besoin
+                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(1)
+                    
+                    species = self.extract_species_from_current_page()
+                    
+                    # Ajout a la liste globale
+                    for sp in species:
+                        sp['ordre'] = order['name']
+                        sp['famille'] = fam['name']
+                        master_list.append(sp)
+                        
+                    sys.stdout.write(f"\r      + {fam['name']} : {len(species)} codes recuperes.\n")
+                
+                count_ord += 1
 
-            # 3. Sauvegarde JSON
-            self.save_json("toutes_especes", items)
+            # SAUVEGARDE
+            os.makedirs("data/0_planning", exist_ok=True)
+            path = "data/0_planning/MASTER_AVES_CODES.json"
             
-            # 4. Telechargement Images
-            logger.info(f"Debut du telechargement des images pour {len(items)} especes...")
-            
-            download_count = 0
-            for item in items:
-                if item["image_url"]:
-                    success = self.save_image(item["image_url"], item['common_name'])
-                    if success:
-                        download_count += 1
-            
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(master_list, f, indent=4, ensure_ascii=False)
+                
             logger.info("-" * 30)
-            logger.info(f" TERMINÉ.")
-            logger.info(f" Espèces collectées : {len(items)}")
-            logger.info(f" Images sauvegardées : {download_count}")
-            logger.info("-" * 30)
+            logger.info(f"Termine. {len(master_list)} especes/sous-especes sauvegardees.")
+            logger.info(f"Fichier : {path}")
 
         except Exception as e:
-            logger.error(f"Erreur : {e}")
+            logger.error(f"Erreur critique : {e}")
         finally:
-            if self.driver:
-                self.driver.quit()
+            if self.driver: self.driver.quit()
 
 if __name__ == "__main__":
-    scraper = INaturalistScraper()
-    scraper.run()
+    bot = INaturalistDeepTraverser()
+    bot.run()
