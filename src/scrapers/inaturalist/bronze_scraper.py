@@ -1,164 +1,167 @@
 import json
 import time
 import os
-import concurrent.futures
+import requests
 import random
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import concurrent.futures
+import threading
+from datetime import datetime
 
-# --- CONFIGURATION ---
-INPUT_PLAN = "data/0_planning/SCRAPING_PLAN_3.json"  # Le fichier généré par l'API
-OUTPUT_DIR = "data/bronze/inaturalist/pages"         # Où on stocke les HTML
-MAX_WORKERS = 4                                      # Nombre de navigateurs en parallèle (4-6 recommandés)
-TIMEOUT = 15                                         # Temps max pour charger une page
+# --- CONFIGURATION STABILISÉE ---
+INPUT_PLAN = "data/0_planning/SCRAPING_PLAN_3.json"
+OUTPUT_DIR = "data/bronze/inaturalist/pages"
 
-def get_optimized_driver():
-    """ Crée un driver Chrome ultra-léger pour le scraping de masse """
-    chrome_options = Options()
-    chrome_options.add_argument("--headless") 
-    chrome_options.add_argument("--log-level=3")
-    chrome_options.add_argument("--silent")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+# On réduit la charge pour éviter le "Soft Ban"
+MAX_WORKERS = 4 
+MIN_SLEEP = 1.5
+MAX_SLEEP = 3.5
+
+# LISTE DE CAMOUFLAGE (User-Agents Rotatifs)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/119.0.0.0 Safari/537.36"
+]
+
+thread_local = threading.local()
+
+def get_session():
+    """ Crée une session avec un User-Agent aléatoire fixe pour ce thread """
+    if not hasattr(thread_local, "session"):
+        thread_local.session = requests.Session()
+        # On choisit une identité au hasard pour ce worker
+        ua = random.choice(USER_AGENTS)
+        thread_local.session.headers.update({
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
+        })
+    return thread_local.session
+
+def get_full_wikipedia_content(session, scientific_name, common_name):
+    attempts = [
+        {"lang": "fr", "query": scientific_name},
+        {"lang": "en", "query": scientific_name},
+        {"lang": "fr", "query": common_name}
+    ]
     
-    # OPTIMISATION MAJEURE : Bloquer le chargement des images et du CSS
-    # On ne veut que le HTML, on se fiche que la page soit "belle".
-    prefs = {
-        "profile.managed_default_content_settings.images": 2,       # Pas d'images
-        "profile.managed_default_content_settings.stylesheets": 2,  # Pas de CSS
-        "profile.managed_default_content_settings.cookies": 2,      # Pas de cookies
-        "profile.managed_default_content_settings.javascript": 1    # JS activé (obligatoire pour React)
-    }
-    chrome_options.add_experimental_option("prefs", prefs)
-    
-    # Stratégie de chargement "eager" : On n'attend pas que tout soit chargé à 100%
-    # Dès que le DOM est interactif, on prend la main.
-    chrome_options.page_load_strategy = 'eager'
-    
-    return webdriver.Chrome(options=chrome_options)
+    for attempt in attempts:
+        if not attempt["query"]: continue
+        try:
+            url = f"https://{attempt['lang']}.wikipedia.org/w/api.php"
+            params = {
+                "action": "query", "format": "json", "titles": attempt["query"],
+                "prop": "extracts", "explaintext": True, "redirects": 1
+            }
+            # Timeout court pour Wiki, ce n'est pas le goulot d'étranglement
+            resp = session.get(url, params=params, timeout=3)
+            if resp.status_code == 200:
+                pages = resp.json().get("query", {}).get("pages", {})
+                pid = next(iter(pages))
+                if pid != "-1" and len(pages[pid].get("extract", "")) > 100:
+                    return {
+                        "source": f"wikipedia_{attempt['lang']}",
+                        "title": pages[pid].get("title"),
+                        "full_text": pages[pid]["extract"]
+                    }
+        except: continue
+    return None
 
-def scrape_worker(species_subset, worker_id):
-    """
-    Fonction exécutée par chaque 'Worker' (Thread).
-    Il ouvre son propre navigateur et traite sa liste d'espèces.
-    """
-    print(f"[Worker {worker_id}] Démarrage... ({len(species_subset)} espèces à traiter)")
+def process_species(sp):
+    sp_id = sp['id']
+    url = sp['url']
+    filename = os.path.join(OUTPUT_DIR, f"{sp_id}.json")
     
-    driver = None
-    try:
-        driver = get_optimized_driver()
-    except Exception as e:
-        print(f"[Worker {worker_id}] Erreur initialisation driver: {e}")
-        return
+    if os.path.exists(filename): return "EXISTS"
 
-    count = 0
-    for sp in species_subset:
-        sp_id = sp['id']
-        filename = os.path.join(OUTPUT_DIR, f"{sp_id}.json")
+    session = get_session()
+    
+    # STRATÉGIE DE BACKOFF EXPONENTIEL (Tentatives intelligentes)
+    # Tentative 1 : immédiate
+    # Tentative 2 : attendre 5s
+    # Tentative 3 : attendre 15s (si le serveur est fâché)
+    delays = [0, 5, 15] 
 
-        # 1. Skip si déjà fait (Reprise sur erreur)
-        if os.path.exists(filename):
-            continue
+    for delay in delays:
+        if delay > 0:
+            time.sleep(delay)
 
         try:
-            # 2. Navigation
-            driver.get(sp['url'])
-
-            # 3. Attente ciblée (TaxonDetail)
-            # On attend juste que la boite principale apparaisse
-            try:
-                element = WebDriverWait(driver, TIMEOUT).until(
-                    EC.presence_of_element_located((By.ID, "TaxonDetail"))
-                )
+            # Timeout augmenté pour absorber les lenteurs du serveur
+            response = session.get(url, timeout=20)
+            
+            # Si on se fait bloquer (429) ou erreur serveur (5xx), on retry
+            if response.status_code == 429 or response.status_code >= 500:
+                continue 
+            
+            if response.status_code == 200:
+                html_content = response.text
+                wiki_data = get_full_wikipedia_content(session, sp.get('scientific_name'), sp.get('nom'))
                 
-                # Petite pause aléatoire pour ne pas ressembler à un robot (0.5 à 1.5s)
-                # Même en mode bourrin, un peu d'aléatoire évite le ban IP
-                time.sleep(random.uniform(0.5, 1.5))
-                
-                # 4. Extraction
-                raw_html = element.get_attribute('outerHTML')
-                
-                # 5. Sauvegarde
-                data = {
-                    "id": sp_id,
-                    "url": sp['url'],
-                    "scraped_at": time.time(),
-                    "raw_html_content": raw_html
+                final_data = {
+                    "id": sp_id, "url": url,
+                    "scraped_at": datetime.now().isoformat(),
+                    "scientific_name": sp.get('scientific_name'),
+                    "common_name": sp.get('nom'),
+                    "raw_html_content": html_content,
+                    "external_description": wiki_data
                 }
-                
+
                 with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False)
-                
-                count += 1
-                if count % 10 == 0:
-                    print(f"[Worker {worker_id}] {count}/{len(species_subset)} traités.")
+                    json.dump(final_data, f, ensure_ascii=False)
 
-            except Exception as e:
-                print(f"[Worker {worker_id}] Timeout/Erreur sur {sp_id} : {e}")
-                # On écrit un fichier vide ou d'erreur pour ne pas rebloquer dessus ?
-                # Non, on laisse pour retenter plus tard.
+                # Pause aléatoire pour casser le rythme robotique
+                time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
+                return "OK"
+            
+            elif response.status_code == 404:
+                return "ERROR_404" # Inutile de réessayer une 404
 
-        except Exception as e:
-            print(f"[Worker {worker_id}] Crash critique sur {sp_id}: {e}")
-            # Si le driver est mort, on tente de le relancer
-            try:
-                driver.quit()
-                driver = get_optimized_driver()
-            except: pass
+        except requests.exceptions.RequestException:
+            continue # Erreur réseau pure -> on retry
 
-    if driver:
-        driver.quit()
-    print(f"[Worker {worker_id}] Terminé.")
+    return "ERROR_FINAL"
 
-def run_orchestrator():
-    # 1. Préparation
-    if not os.path.exists(INPUT_PLAN):
-        print("Erreur : Lance d'abord l'API Harvester pour générer le plan !")
-        return
+def run_stable_scraper():
+    if not os.path.exists(INPUT_PLAN): return
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
     with open(INPUT_PLAN, 'r', encoding='utf-8') as f:
         full_list = json.load(f)
     
-    # Filtrer ceux déjà faits pour gagner du temps au redémarrage
-    existing_files = set(os.listdir(OUTPUT_DIR))
-    todo_list = [sp for sp in full_list if f"{sp['id']}.json" not in existing_files]
+    # Mélange aléatoire pour ne pas taper toujours les mêmes familles
+    random.shuffle(full_list)
+
+    existing = set(os.listdir(OUTPUT_DIR))
+    todo = [sp for sp in full_list if f"{sp['id']}.json" not in existing]
     
-    total = len(full_list)
-    remaining = len(todo_list)
+    print(f"🛡️ Démarrage MODE STABLE ({MAX_WORKERS} workers)")
+    print(f"📋 Reste : {len(todo)} espèces.")
     
-    print(f"PLAN DE CHARGE : {total} espèces au total.")
-    print(f"DÉJÀ FAIT      : {total - remaining}")
-    print(f"À FAIRE        : {remaining}")
-    print("-" * 50)
+    stats = {"OK": 0, "ERR": 0, "SKIP": 0}
+    start = time.time()
 
-    if remaining == 0:
-        print("Tout est fini ! Bravo.")
-        return
-
-    # 2. Découpage pour les Workers
-    # On divise la liste en N parts égales
-    chunk_size = len(todo_list) // MAX_WORKERS + 1
-    chunks = [todo_list[i:i + chunk_size] for i in range(0, len(todo_list), chunk_size)]
-
-    print(f"Lancement de {len(chunks)} workers en parallèle...")
-
-    # 3. Exécution Parallèle
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = []
-        for i, chunk in enumerate(chunks):
-            futures.append(executor.submit(scrape_worker, chunk, i+1))
+        futures = {executor.submit(process_species, sp): sp for sp in todo}
         
-        # Attente de la fin
-        concurrent.futures.wait(futures)
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            res = future.result()
+            if res == "OK": stats["OK"] += 1
+            elif res == "EXISTS": stats["SKIP"] += 1
+            else: stats["ERR"] += 1
+            
+            if (i + 1) % 20 == 0:
+                elapsed = time.time() - start
+                rate = (i + 1) / elapsed
+                # Calcul précis du % d'erreur
+                err_rate = (stats["ERR"] / (stats["OK"] + stats["ERR"] + 0.1)) * 100
+                rem_min = (len(todo) - (i + 1)) / (rate + 0.01) / 60
+                
+                print(f"[{i+1}/{len(todo)}] Vit: {rate:.1f} sp/s | Erreurs: {stats['ERR']} ({err_rate:.1f}%) | Fin: ~{rem_min:.0f} min")
 
-    print("-" * 50)
-    print("SCRAPING TERMINÉ.")
+    print(f"Terminé. OK: {stats['OK']}, Erreurs: {stats['ERR']}")
 
 if __name__ == "__main__":
-    run_orchestrator()
+    run_stable_scraper()

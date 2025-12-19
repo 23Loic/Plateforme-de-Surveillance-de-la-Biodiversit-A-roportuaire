@@ -9,13 +9,15 @@ env/
 .env
 
 # --- Données (On ne versionne PAS les HTML/PDF bruts) ---
+data/0_planning/*
+
 data/1_bronze/*
 data/2_silver/*
 data/3_gold/*
 !data/1_bronze/.gitkeep
 !data/2_silver/.gitkeep
 !data/3_gold/.gitkeep
-
+data/bronze/inaturalist/pages
 # --- Système & IDE ---
 .DS_Store
 Thumbs.db
